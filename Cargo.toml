@@ -1,0 +1,43 @@
+[package]
+name          = "esp-net-easy"
+version       = "0.1.0"
+edition       = "2024"
+authors       = ["Jorge Andre Castro <georgeandrec@gmail.com>"]
+description   = "Abstraction asynchrone no_std pour simplifier la configuration WiFi et la pile réseau Embassy sur les puces ESP32."
+readme        = "README.md"
+license       = "GPL-2.0-or-later"
+repository    = "https://github.com/jorgeandrecastro/esp-net-easy"
+documentation = "https://docs.rs/esp-net-easy"
+keywords      = ["esp32", "wifi", "embassy", "network", "no-std"]
+categories    = ["embedded", "no-std", "hardware-support"]
+[lib]
+name = "esp_net_easy"
+path = "src/lib.rs"
+[dependencies]
+# Framework Embassy et sa pile réseau
+embassy-executor = { version = "0.10" }
+embassy-net      = { version = "0.9", features = ["proto-ipv4", "medium-ethernet", "tcp", "dns"] }
+embassy-time     = { version = "0.5" }
+# Écosystème ESP32 (esp-hal 1.x : esp-rtos remplace esp-hal-embassy, esp-radio remplace esp-wifi)
+esp-hal      = { version = "1.1", features = ["unstable"] }
+esp-radio    = { version = "0.18", features = ["wifi"] }
+esp-rtos     = { version = "0.3", features = ["embassy"] }
+esp-println  = { version = "0.17", features = ["log-04"] }
+# Structure de données statique pour Embassy (indispensable en no_std)
+static_cell  = { version = "2.1" }
+# Collection à taille fixe sans allocation dynamique (utilisé pour les DNS).
+# NOTE: embassy-net 0.9 dépend de heapless 0.9 ; cette version doit matcher
+# pour que `heapless::Vec<Ipv4Address, 3>` soit compatible avec
+# `StaticConfigV4::dns_servers`.
+heapless     = { version = "0.9" }
+[features]
+esp32c3 = ["esp-hal/esp32c3", "esp-radio/esp32c3", "esp-rtos/esp32c3", "esp-println/esp32c3"]
+esp32c6 = ["esp-hal/esp32c6", "esp-radio/esp32c6", "esp-rtos/esp32c6", "esp-println/esp32c6"]
+esp32s3 = ["esp-hal/esp32s3", "esp-radio/esp32s3", "esp-rtos/esp32s3", "esp-println/esp32s3"]
+esp32   = ["esp-hal/esp32",   "esp-radio/esp32",   "esp-rtos/esp32",   "esp-println/esp32"]
+[profile.release]
+opt-level     = "z"     # Optimisation maximale pour réduire la taille du binaire en Flash
+lto           = true    # Link-Time Optimization pour éliminer agressivement le code mort
+codegen-units = 1       # Génération de code centralisée pour maximiser l'efficacité de la LTO
+panic         = "abort" # Pas de unwinding (déroulement de pile), requis pour le bare-metal
+strip         = true    # Supprime tous les symboles de débuggage pour la production complet corrige
