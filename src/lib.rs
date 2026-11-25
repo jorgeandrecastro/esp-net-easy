@@ -72,8 +72,7 @@
 //!    - [`net_task`] runs the network stack runner.
 //!    - [`wifi_connection_task`] configures station mode and reconnects after
 //!      disconnection.
-//! 6. The function waits for `stack.wait_config_up()` before returning the
-//!    ready [`net::Stack`].
+//! 6. The function returns the ready [`net::Stack`].
 //!
 //! ## Known limitations
 //!
@@ -85,6 +84,7 @@
 
 #![no_std]
 
+use core::net::Ipv4Addr;
 use core::str::FromStr;
 
 use embassy_executor::Spawner;
@@ -197,7 +197,7 @@ pub struct WifiEasyConfig {
 ///
 /// This function creates the controller and station interface, prepares static
 /// IPv4 parameters, allocates stack storage and packet pool resources, starts
-/// background tasks, and waits for the network interface to become active.
+/// background tasks, and returns the network stack.
 ///
 /// # Arguments
 /// * `spawner` - Hazard3-compatible executor spawner for background tasks.
@@ -234,14 +234,12 @@ pub async fn init_esp_net_easy(
     let _device = interfaces.station;
 
     // 2. Parse static IPv4 address, gateway, and optional DNS server.
-    let _static_ip =
-        net::wire::Ipv4Address::from_str(config.static_ip).expect("Invalid STATIC_IP format");
-    let _gateway_ip =
-        net::wire::Ipv4Address::from_str(config.gateway_ip).expect("Invalid GATEWAY_IP format");
+    let _static_ip = Ipv4Addr::from_str(config.static_ip).expect("Invalid STATIC_IP format");
+    let _gateway_ip = Ipv4Addr::from_str(config.gateway_ip).expect("Invalid GATEWAY_IP format");
 
-    let mut _dns_servers: heapless::Vec<net::wire::Ipv4Address, 3> = heapless::Vec::new();
+    let mut _dns_servers: heapless::Vec<Ipv4Addr, 3> = heapless::Vec::new();
     if let Some(dns_str) = config.dns_server {
-        if let Ok(dns_ip) = net::wire::Ipv4Address::from_str(dns_str) {
+        if let Ok(dns_ip) = Ipv4Addr::from_str(dns_str) {
             let _ = _dns_servers.push(dns_ip);
         }
     }
@@ -270,10 +268,7 @@ pub async fn init_esp_net_easy(
     );
     spawner.spawn(net_task(runner).expect("esp-net-easy: failed to spawn net_task"));
 
-    // 6. Wait asynchronously until the network interface is configured and active.
-    esp_println::println!("esp-net-easy: Waiting for the network to become active...");
-    stack.wait_config_up().await;
-    esp_println::println!("esp-net-easy: Network configuration is active.");
+    esp_println::println!("esp-net-easy: Network stack initialized.");
 
     stack
 }

@@ -31,7 +31,7 @@ Rust imports such as `embassy_executor`, `embassy_net`, and `embassy_time` remai
 
 ## ESP radio initialization
 
-Since `esp-radio` 0.18, `esp_radio::init()` and `esp_radio::Controller` no longer exist. The radio controller is initialized by `esp_radio::wifi::new`, which takes the HAL `WIFI` peripheral directly. Therefore, [`init_esp_net_easy`] does not need a separate radio-controller argument.
+Since `esp-radio` 0.18, `esp_radio::init()` and `esp_radio::Controller` no longer exist. The radio controller is initialized by `esp_radio::wifi::new`, which takes the HAL `WIFI` peripheral directly. Therefore, `init_esp_net_easy` does not need a separate radio-controller argument.
 
 ## Application requirements
 
@@ -97,11 +97,9 @@ async fn main(spawner: Spawner) -> ! {
 3. The ESP32 hardware RNG generates a 64-bit seed for the network stack.
 4. Static `StackStorage` and packet pool resources are allocated through `static_cell`.
 5. Hazard3-compatible background tasks are spawned:
-
    - `net_task` runs the network stack runner.
    - `wifi_connection_task` configures station mode, connects, waits for disconnection, and reconnects automatically.
-
-6. The function waits for `stack.wait_config_up()` before returning the ready stack.
+6. The function returns the initialized stack.
 
 ## Known limitations
 
