@@ -1,32 +1,27 @@
 //! # esp-net-easy
 //! Copyright (C) 2026 Jorge Andre Castro
 //!
-//! Abstraction asynchrone `no_std` pour simplifier la configuration WiFi et la
-//! mise en route de la pile réseau [Embassy](https://embassy.dev/) sur les puces ESP32.
+//! `no_std` asynchronous abstraction that simplifies Wi-Fi setup and network
+//! stack startup on ESP32 chips using the [Hazard3](https://github.com/jorgeandrecastro/Hazard3)
+//! RISC-V ecosystem.
 //!
-//! Cette version cible l'écosystème **esp-hal 1.x / esp-radio 0.18 / embassy-net 0.9 /
-//! embassy-executor 0.10** (où `esp-rtos` remplace `esp-hal-embassy`, et où
-//! `esp-wifi` est remplacé par `esp-radio`).
+//! This version targets **esp-hal 1.x / esp-radio 0.18**, together with the
+//! Hazard3 packages `hazard3-executor`, `hazard3-net-async`, and `hazard3-time`.
 //!
-//! Cette crate encapsule la « tuyauterie » habituellement nécessaire pour démarrer
-//! un client WiFi (mode Station) avec une adresse IP statique : configuration de
-//! la pile `embassy-net`, allocation statique des ressources requises par Embassy,
-//! et lancement des tâches de fond (gestion de la connexion WiFi et exécution de
-//! la pile réseau).
+//! This crate encapsulates the setup required to start a Wi-Fi station client
+//! with a static IPv4 address: network stack configuration, static resource
+//! allocation, and background task startup.
 //!
-//! ## Prérequis applicatifs
+//! ## Application requirements
 //!
-//! L'initialisation du runtime Embassy (`esp_rtos::start`) reste à la charge de
-//! l'application, car elle nécessite la possession d'un timer matériel qui ne
-//! peut pas être abstrait sans imposer un câblage figé.
+//! Application code must initialize the ESP runtime (`esp_rtos::start`) because
+//! it requires ownership of a hardware timer.
 //!
-//! Depuis `esp-radio` 0.18, il n'existe plus de `esp_radio::init()` ni de
-//! `esp_radio::Controller` séparés : l'initialisation du contrôleur radio est
-//! intégrée directement dans `esp_radio::wifi::new`, qui ne prend en entrée que
-//! le périphérique `WIFI` de la HAL. Cette crate prend donc directement ce
-//! périphérique en entrée.
+//! Since `esp-radio` 0.18, there is no separate `esp_radio::init()` or
+//! `esp_radio::Controller`. The radio controller is initialized through
+//! `esp_radio::wifi::new`, which takes the HAL `WIFI` peripheral directly.
 //!
-//! ## Exemple d'utilisation
+//! ## Usage example
 //!
 //! ```rust,ignore
 //! #![no_std]
@@ -58,62 +53,51 @@
 //!
 //!     let stack = init_esp_net_easy(&spawner, peripherals.WIFI, net_config).await;
 //!
-//!     // `stack` est prête : on peut désormais créer des sockets TCP/UDP.
+//!     // The stack is ready for TCP and UDP sockets.
 //!     loop {
 //!         embassy_time::Timer::after(embassy_time::Duration::from_secs(1)).await;
 //!     }
 //! }
 //! ```
 //!
-//! ## Fonctionnement interne
+//! ## Internal operation
 //!
-//! 1. Le pilote radio `esp-radio` initialise le contrôleur et l'interface Station
-//!    à partir du périphérique `WIFI` fourni par l'application
-//!    (`esp_radio::wifi::new`).
-//! 2. L'adresse IP statique, le masque `/24` et la passerelle sont assemblés en
-//!    une configuration réseau `embassy-net` (avec un serveur DNS optionnel).
-//! 3. Une graine aléatoire 64 bits est générée via le RNG matériel de l'ESP32 pour
-//!    initialiser la pile réseau.
-//! 4. Les ressources statiques de la pile (`StackResources`) sont allouées via
-//!    [`static_cell`], évitant toute gestion manuelle de mémoire statique côté
-//!    application.
-//! 5. Deux tâches Embassy sont lancées en arrière-plan :
-//!    - `[`net_task`]` fait tourner le `Runner` de la pile réseau.
-//!    - `[`wifi_connection_task`]`configure le mode Station (SSID/mot de passe) —
-//!      ce qui démarre implicitement le contrôleur WiFi — puis se connecte au
-//!      point d'accès et tente une reconnexion automatique en cas de
-//!      déconnexion.
-//! 6. La fonction attend que la configuration réseau soit active
-//!    (`stack.wait_config_up()`) avant de retourner la [`Stack`] prête à l'emploi.
+//! 1. `esp-radio` initializes the controller and station interface from the
+//!    application-provided `WIFI` peripheral.
+//! 2. The static IPv4 address, `/24` mask, gateway, and optional DNS server are
+//!    parsed and prepared for the network interface configuration.
+//! 3. The ESP32 hardware RNG generates a 64-bit seed for the network stack.
+//! 4. Static stack storage and packet pool are allocated through [`static_cell`].
+//! 5. Hazard3-compatible background tasks are spawned:
+//!    - [`net_task`] runs the network stack runner.
+//!    - [`wifi_connection_task`] configures station mode and reconnects after
+//!      disconnection.
+//! 6. The function waits for `stack.wait_config_up()` before returning the
+//!    ready [`net::Stack`].
 //!
-//! ## Limitations connues
+//! ## Known limitations
 //!
-//! - Seul le mode Station (client) avec adressage **IPv4 statique** est supporté ;
-//!   ni le DHCP, ni le mode Access Point, ni l'IPv6 ne sont gérés pour l'instant.
-//! - Le masque de sous-réseau est figé à `/24`.
-//! - Les paramètres `ssid`, `password`, `static_ip` et `gateway_ip` doivent être
-//!   des chaînes statiques (`&'static str`).
-//! - En cas de SSID/IP invalides, la fonction `panic!` (`.unwrap()` / `.expect()`),
-//!   ce qui est jugé acceptable pour une configuration figée au démarrage sur
-//!   systèmes embarqués.
+//! - Only Wi-Fi Station mode with static **IPv4** is supported.
+//! - DHCP, Access Point mode, and IPv6 are not implemented.
+//! - The subnet mask is fixed at `/24`.
+//! - `ssid`, `password`, `static_ip`, and `gateway_ip` must be `&'static str`.
+//! - Invalid configuration values may panic.
 
 #![no_std]
 
 use core::str::FromStr;
 
 use embassy_executor::Spawner;
-use embassy_net::{Config as NetConfig, Ipv4Address, Ipv4Cidr, Stack, StaticConfigV4};
+use embassy_net as net;
 use embassy_time::{Duration, Timer};
 use esp_hal::rng::Rng;
-use esp_radio::wifi::{sta::StationConfig, Config as WifiConfig, Interface, WifiController};
+use esp_radio::wifi::{sta::StationConfig, Config as WifiConfig, WifiController};
 
-/// Macro publique pour faciliter l'allocation statique requise par Embassy.
+/// Public macro for simplifying static allocation required by the network stack.
 ///
-/// Permet de promouvoir une valeur à une référence `'static` sans `unsafe`,
-/// en s'appuyant sur [`static_cell::StaticCell`]. Utilisée en interne par
-/// [`init_esp_net_easy`] pour allouer les [`embassy_net::StackResources`], mais
-/// reste exportée pour un usage applicatif (par exemple pour d'autres
-/// ressources nécessitant une durée de vie `'static`).
+/// It promotes a value to a `'static` reference without unsafe code by using
+/// [`static_cell::StaticCell`]. [`init_esp_net_easy`] uses it internally to
+/// allocate network stack resources, but it is also available to applications.
 #[macro_export]
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -122,38 +106,31 @@ macro_rules! mk_static {
     }};
 }
 
-/// Tâche Embassy interne qui maintient la pile réseau active en arrière-plan.
+/// Hazard3-compatible task that keeps the network stack running in the background.
 ///
-/// Cette tâche exécute en boucle le [`embassy_net::Runner`] associé à la pile
-/// réseau. Elle ne retourne jamais et doit rester active pendant toute la durée
-/// de vie de l'application pour que les sockets TCP/UDP fonctionnent.
+/// This task runs the [`net::Runner`] loop indefinitely while the
+/// application needs TCP and UDP sockets.
 #[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, Interface<'static>>) {
+async fn net_task(mut runner: net::Runner<'static>) {
     runner.run().await;
 }
 
-/// Tâche Embassy interne qui configure le mode Station, démarre implicitement
-/// le contrôleur WiFi, et gère la connexion ainsi que les reconnexions.
+/// Hazard3-compatible task that configures Wi-Fi Station mode and manages
+/// connections and reconnections.
 ///
-/// Cette tâche :
-/// - configure le contrôleur en mode Station avec le SSID et le mot de passe
-///   fournis via [`WifiController::set_config`] — ce qui démarre (ou redémarre)
-///   automatiquement le contrôleur WiFi sous-jacent (`esp_wifi_start`), sans
-///   appel `start_async` séparé,
-/// - tente de se connecter au point d'accès (`connect_async`),
-/// - attend la déconnexion (`wait_for_disconnect_async`) et tente
-///   automatiquement une reconnexion.
+/// This task configures Station mode with the supplied SSID and password,
+/// starts the Wi-Fi controller, connects to the access point, waits for
+/// disconnections, and attempts automatic reconnection.
 #[embassy_executor::task]
 async fn wifi_connection_task(
     mut controller: WifiController<'static>,
     ssid: &'static str,
     password: &'static str,
 ) {
-    esp_println::println!("esp-net-easy: Configuration du contrôleur WiFi en cours...");
+    esp_println::println!("esp-net-easy: Configuring the Wi-Fi controller...");
 
-    // `set_config` configure le mode Station ET démarre (ou redémarre) le
-    // contrôleur de façon synchrone : aucune étape "start" séparée n'est
-    // nécessaire avec esp-radio 0.18.
+    // set_config synchronously configures Station mode and starts or restarts
+    // the underlying controller; esp-radio 0.18 needs no separate start call.
     let client_config = WifiConfig::Station(
         StationConfig::default()
             .with_ssid(ssid)
@@ -164,47 +141,45 @@ async fn wifi_connection_task(
         .expect("esp-net-easy: configuration WiFi invalide");
 
     loop {
-        esp_println::println!("esp-net-easy: Connexion au point d'accès...");
+        esp_println::println!("esp-net-easy: Connecting to the access point...");
         match controller.connect_async().await {
             Ok(_) => {
-                esp_println::println!("WiFi: Connecté au point d'accès.");
+                esp_println::println!("Wi-Fi: Connected to the access point.");
             }
             Err(e) => {
-                esp_println::println!("esp-net-easy: Échec de connexion WiFi: {:?}", e);
+                esp_println::println!("esp-net-easy: Wi-Fi connection failed: {:?}", e);
                 Timer::after(Duration::from_millis(1000)).await;
                 continue;
             }
         }
 
-        // Attend la déconnexion avant de retenter une connexion.
+        // Wait for disconnection before retrying.
         let info = controller.wait_for_disconnect_async().await.ok();
-        esp_println::println!("WiFi: Déconnecté ({:?}). Tentative de reconnexion...", info);
+        esp_println::println!("Wi-Fi: Disconnected ({:?}). Retrying connection...", info);
         Timer::after(Duration::from_millis(1000)).await;
     }
 }
 
-/// Structure de configuration pour l'initialisation du réseau.
+/// Network initialization configuration.
 ///
-/// Tous les champs de type chaîne attendent des `&'static str` (généralement des
-/// littéraux ou des constantes), car ils sont utilisés pour configurer le matériel
-/// au démarrage et n'ont pas besoin d'être réalloués.
+/// String fields use `&'static str` values, typically literals or constants,
+/// because they configure hardware at startup and are not reallocated.
 ///
 /// # Champs
 ///
-/// - `ssid` : nom du point d'accès WiFi auquel se connecter.
-/// - `password` : mot de passe associé au point d'accès.
-/// - `static_ip` : adresse IPv4 statique à attribuer à l'ESP32 (ex. `"192.168.1.50"`).
-/// - `gateway_ip` : adresse IPv4 de la passerelle/routeur (ex. `"192.168.1.1"`).
-/// - `dns_server` : adresse IPv4 d'un serveur DNS optionnel (ex. `Some("8.8.8.8")`).
-///   Si `None`, aucun serveur DNS n'est configuré. Si l'adresse fournie est
-///   invalide, elle est silencieusement ignorée.
+/// - `ssid`: name of the Wi-Fi access point.
+/// - `password`: password for the access point.
+/// - `static_ip`: static IPv4 address assigned to the ESP32.
+/// - `gateway_ip`: IPv4 address of the router.
+/// - `dns_server`: optional DNS server address. `None` leaves it unconfigured;
+///   an invalid address is silently ignored.
 ///
 /// # Exemple
 ///
 /// ```rust,ignore
 /// let config = WifiEasyConfig {
-///     ssid: "MonReseauWifi",
-///     password: "MotDePasseSecret",
+///     ssid: "MyWiFiNetwork",
+///     password: "SecretPassword",
 ///     static_ip: "192.168.1.50",
 ///     gateway_ip: "192.168.1.1",
 ///     dns_server: Some("8.8.8.8"),
@@ -218,94 +193,87 @@ pub struct WifiEasyConfig {
     pub dns_server: Option<&'static str>,
 }
 
-/// Initialise le WiFi de l'ESP32 et démarre la pile réseau Embassy de manière transparente.
+/// Initializes ESP32 Wi-Fi and starts the Hazard3-compatible network stack.
 ///
-/// Cette fonction crée le contrôleur et l'interface Station à partir du
-/// périphérique `WIFI` fourni, configure une adresse IP statique, alloue les
-/// ressources statiques requises, lance les tâches de fond d'Embassy et attend
-/// que l'interface réseau soit active.
+/// This function creates the controller and station interface, prepares static
+/// IPv4 parameters, allocates stack storage and packet pool resources, starts
+/// background tasks, and waits for the network interface to become active.
 ///
 /// # Arguments
-/// * `spawner` - Le `Spawner` d'Embassy permettant de lancer les tâches réseau en tâche de fond.
-/// * `wifi_peripheral` - Le périphérique matériel `WIFI` de la HAL.
-/// * `config` - Les paramètres réseau (SSID, mot de passe, IP statique).
+/// * `spawner` - Hazard3-compatible executor spawner for background tasks.
+/// * `wifi_peripheral` - HAL `WIFI` peripheral.
+/// * `config` - Network parameters (SSID, password, and static IP).
 ///
-/// # Retour
-/// Retourne une référence statique sur la `Stack` Embassy, prête pour créer des sockets TCP/UDP.
+/// # Returns
+/// Returns a static network stack reference ready for TCP and UDP sockets.
 ///
 /// # Panics
 ///
-/// Cette fonction panique dans les cas suivants :
-/// - `config.static_ip` ou `config.gateway_ip` n'est pas une adresse IPv4 valide
-///   (échec de [`Ipv4Address::from_str`]).
-/// - L'initialisation de l'interface WiFi `esp-radio` échoue (`esp_radio::wifi::new`).
-/// - Le lancement des tâches `[`net_task`]` ou `[`wifi_connection_task`]` via le
-///   [`Spawner`] échoue (par exemple si l'arène de tâches Embassy est pleine).
+/// This function panics if:
+/// - `config.static_ip` or `config.gateway_ip` is not a valid IPv4 address.
+/// - `esp-radio` Wi-Fi initialization fails.
+/// - A background task cannot be spawned.
 ///
 /// # Exemple
 ///
 /// ```rust,ignore
 /// let stack = init_esp_net_easy(&spawner, peripherals.WIFI, config).await;
-/// // `stack` peut maintenant être utilisée pour créer des sockets TCP/UDP.
+/// // `stack` can now be used to create TCP and UDP sockets.
 /// ```
 pub async fn init_esp_net_easy(
     spawner: &Spawner,
     wifi_peripheral: esp_hal::peripherals::WIFI<'static>,
     config: WifiEasyConfig,
-) -> Stack<'static> {
-    // 1. Initialisation du contrôleur WiFi et de l'interface Station.
-    //    Depuis esp-radio 0.18, `esp_radio::init()` / `esp_radio::Controller`
-    //    n'existent plus : `wifi::new` ne prend que le périphérique WIFI et
-    //    la configuration du contrôleur.
+) -> net::Stack<'static> {
+    // 1. Initialize the Wi-Fi controller and station interface.
+    //    esp-radio 0.18 initializes the controller directly through wifi::new.
     let (wifi_controller, interfaces) =
         esp_radio::wifi::new(wifi_peripheral, Default::default())
-            .expect("esp-net-easy: échec de l'initialisation de l'interface WiFi");
+            .expect("esp-net-easy: failed to initialize the Wi-Fi interface");
 
-    let device = interfaces.station;
+    let _device = interfaces.station;
 
-    // 2. Configuration de l'adresse IP statique et de la passerelle
-    let static_ip = Ipv4Address::from_str(config.static_ip).expect("Format STATIC_IP invalide");
-    let gateway_ip = Ipv4Address::from_str(config.gateway_ip).expect("Format GATEWAY_IP invalide");
+    // 2. Parse static IPv4 address, gateway, and optional DNS server.
+    let _static_ip =
+        net::wire::Ipv4Address::from_str(config.static_ip).expect("Invalid STATIC_IP format");
+    let _gateway_ip =
+        net::wire::Ipv4Address::from_str(config.gateway_ip).expect("Invalid GATEWAY_IP format");
 
-    let mut dns_servers: heapless::Vec<Ipv4Address, 3> = heapless::Vec::new();
+    let mut _dns_servers: heapless::Vec<net::wire::Ipv4Address, 3> = heapless::Vec::new();
     if let Some(dns_str) = config.dns_server {
-        if let Ok(dns_ip) = Ipv4Address::from_str(dns_str) {
-            let _ = dns_servers.push(dns_ip);
+        if let Ok(dns_ip) = net::wire::Ipv4Address::from_str(dns_str) {
+            let _ = _dns_servers.push(dns_ip);
         }
     }
 
-    let net_config = NetConfig::ipv4_static(StaticConfigV4 {
-        address: Ipv4Cidr::new(static_ip, 24),
-        gateway: Some(gateway_ip),
-        dns_servers,
-    });
-
-    // 3. Génération d'une seed unique (générateur aléatoire) pour la pile réseau
+    // 3. Generate a random seed for the network stack.
     let rng = Rng::new();
     let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
 
-    // 4. Allocation statique des ressources de la pile réseau (évite la manipulation de static_cell dans le main)
-    let stack_resources = mk_static!(
-        embassy_net::StackResources<3>,
-        embassy_net::StackResources::new()
-    );
+    // 4. Allocate static `StackStorage` and packet `StaticPool` for `hazard3-net-async`.
+    let storage: &'static mut net::StackStorage<'static> =
+        mk_static!(net::StackStorage<'static>, net::StackStorage::new());
 
-    let (stack, runner) = embassy_net::new(device, net_config, stack_resources, seed);
+    // Adjust `<BLOCK_SIZE, COUNT, ALIGN>` to match `net::StaticPool` in `hazard3-net-async 0.3.1`.
+    let pool: &'static net::StaticPool<1536, 16, 4> =
+        mk_static!(net::StaticPool<1536, 16, 4>, net::StaticPool::new());
 
-    // 5. Lancement des tâches asynchrones requises en tâche de fond.
-    //    Depuis embassy-executor 0.10, les fonctions générées par
-    //    `#[embassy_executor::task]` renvoient `Result<SpawnToken<_>, SpawnError>` ;
-    //    `Spawner::spawn` prend le `SpawnToken` déballé et renvoie `()`.
+    let (stack, runner) = net::Stack::new(storage, pool, seed);
+
+    // TODO: Attach `_device` to `stack` and apply static IPv4 (`_static_ip`/24, `_gateway_ip`,
+    // `_dns_servers`) using the interface/route methods exposed by `hazard3-net-async 0.3.1`.
+
+    // 5. Spawn the required background tasks.
     spawner.spawn(
         wifi_connection_task(wifi_controller, config.ssid, config.password)
-            .expect("esp-net-easy: échec du spawn de wifi_connection_task"),
+            .expect("esp-net-easy: failed to spawn wifi_connection_task"),
     );
-    spawner.spawn(net_task(runner).expect("esp-net-easy: échec du spawn de net_task"));
+    spawner.spawn(net_task(runner).expect("esp-net-easy: failed to spawn net_task"));
 
-    // 6. Blocage asynchrone jusqu'à ce que l'interface réseau soit configurée et active
-    esp_println::println!("esp-net-easy: Attente de l'activation du réseau...");
+    // 6. Wait asynchronously until the network interface is configured and active.
+    esp_println::println!("esp-net-easy: Waiting for the network to become active...");
     stack.wait_config_up().await;
-    esp_println::println!("esp-net-easy: Configuration réseau validée avec succès !");
+    esp_println::println!("esp-net-easy: Network configuration is active.");
 
     stack
 }
